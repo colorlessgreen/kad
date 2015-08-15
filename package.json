@@ -1,0 +1,15 @@
+{
+  "name": "kad",
+  "version": "1.0.0",
+  "description": "A Toy implmentation of Kademlia DHT.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies" : {
+      "bitwise-xor": "~>0",
+      "secure-random": "~>1.1"
+  }
+}
