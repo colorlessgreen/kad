@@ -1,5 +1,6 @@
 var secureRandom = require('secure-random'),
-    xor = require('bitwise-xor')    
+    xor = require('bitwise-xor'),
+    crypto = require('crypto')
 
 var KEY_SIZE = 256,
     K = 20
@@ -12,7 +13,8 @@ var conf = {
 }
 
 var server = require('dgram').createSocket('udp4'),
-    sentMsgs = {}
+    sentMsgs = {},
+    store = {}
 
 var kBuckets = (function() {
     var buckets = []
@@ -95,7 +97,7 @@ function closestNodes(key, n) {
     return nodes
 }
 
-function lookup(key, callback) {
+function lookupNode(key, callback) {
     var kNodes = closestNodes(key, K),
         queried = {}
 
@@ -126,7 +128,6 @@ function lookup(key, callback) {
             })
 
             if (nextRound.length == 0) {
-                console.log(kNodes)
                 callback(kNodes)
             }
             
@@ -140,6 +141,64 @@ function lookup(key, callback) {
     performRound(kNodes.slice(0, 3))
 }
 
+function lookupValue(key, callback) {
+    var kNodes = closestNodes(key, K),
+        queried = {}
+
+    function queryNodes(nodes, callback) {
+        var found = [],
+            count = nodes.length,
+            valueReturned = false
+        
+        nodes.forEach(function(node) {
+            queried[node.nodeId] = true
+            sendFindValue(node, key, function(resp) {
+
+                if (valueReturned)
+                    return
+                
+                if (resp) {
+                    if (resp.result.value) {
+                        valueReturned = true
+                        return callback(resp.result)
+                    }
+                    else
+                        found = found.concat(resp.result)
+                }
+                count -= 1; if (count == 0) {
+                    callback(found.sort(orderByDistance))
+                }
+            })
+        })
+    }
+    
+    function performRound(nodes) {
+        queryNodes(nodes, function(result) {
+            if (result.value) {
+                return callback(result.value)
+            }
+
+            var added = result.filter(function(node) {
+                if (node.nodeId != conf.nodeId)
+                    return insertNode(kNodes, node)
+            })
+
+            var nextRound = kNodes.filter(function(node) {
+                !queried[node.nodeId]
+            })
+
+            if (nextRound.length == 0) {
+                callback()
+            }
+
+            if (added.length > 0)
+                performRound(nextRound.slice(0, 3))
+            else
+                performRound(nextRound)
+        })
+    }
+    performRound(kNodes.slice(0, 3))
+}
 
 function sendMsg(node, msg, timeout, callback) {
     if (!msg.id) {
@@ -151,7 +210,7 @@ function sendMsg(node, msg, timeout, callback) {
     
     server.send(buf, 0, buf.length, node.port, node.host, function(err) {
         if (err) {
-            console.log(err)            
+            console.log(err)
             if (callback) {
                 callback()
             }
@@ -186,6 +245,24 @@ function sendFindNode(node, key, callback) {
     sendMsg(node, {cmd: 'FIND_NODE', args: [key]}, 0, callback)
 }
 
+function sendFindValue(node, key, callback) {
+    sendMsg(node, {cmd: 'FIND_VALUE', args: [key]}, 0, callback)
+}
+
+function sendStoreValue(node, value) {
+    sendMsg(node, {cmd: 'STORE_VALUE', args:[value]})
+}
+
+function storeValue(value) {
+    var buf = new Buffer(JSON.stringify(value)),
+        key = crypto.createHash('sha256').update(buf).digest('hex')
+    lookupNode(key, function(nodes) {
+        nodes.forEach(function(node) {
+            sendStoreValue(node, value)
+        })
+    })
+    return key
+}
 
 server.on('message', function(buf, rinfo) {
     var msg = JSON.parse(buf.toString())
@@ -201,6 +278,27 @@ server.on('message', function(buf, rinfo) {
             cmd: 'FIND_NODE_RESULT',
             result: closestNodes(msg.args[0], K)
         })
+        
+    } else if (msg.cmd == 'FIND_VALUE') {
+
+        var key = msg.args[0], resp
+        if (store[key]) {
+            resp = {value: store[key]}
+        } else {
+            resp = closestNodes(key, K)
+        }
+        
+        sendMsg(msg.sender, {
+            id: msg.id,
+            cmd: 'FIND_VALUE_RESULT',
+            result: resp
+        })
+        
+    } else if (msg.cmd == 'STORE_VALUE') {
+        var value = msg.args[0],
+            buf = new Buffer(JSON.stringify(value)),
+            key = crypto.createHash('sha256').update(buf).digest('hex')
+        store[key] = value
         
     } else if (sentMsgs[msg.id]) {
         var callback = sentMsgs[msg.id]
@@ -219,10 +317,6 @@ server.on('listening', function() {
     conf.seeds.forEach(function(seed) {
         pingNode({host: seed.split(':')[0], port:seed.split(':')[1]})
     })
-
-    setTimeout(function() {
-        lookup(conf.nodeId, function(nodes) { nodes.forEach(addNode) })
-    }, 3000)
 })
 
 server.bind(conf.port)
